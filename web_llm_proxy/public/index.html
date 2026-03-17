@@ -325,9 +325,12 @@
         <div class="section-label">Модель</div>
         <div class="field">
           <select id="model">
-            <option value="claude-opus-4-6">claude-opus-4-6 (умнейшая)</option>
-            <option value="claude-sonnet-4-6">claude-sonnet-4-6 (баланс)</option>
-            <option value="claude-haiku-4-5">claude-haiku-4-5 (быстрая)</option>
+            <option value="GigaChat-2-Max">GigaChat-2-Max (умнейшая)</option>
+            <option value="GigaChat-2-Pro">GigaChat-2-Pro (баланс)</option>
+            <option value="GigaChat-2">GigaChat-2 (быстрая)</option>
+            <option value="GigaChat-Max">GigaChat-Max</option>
+            <option value="GigaChat-Pro">GigaChat-Pro</option>
+            <option value="GigaChat">GigaChat (лёгкая)</option>
           </select>
         </div>
       </div>
@@ -366,6 +369,42 @@
         </div>
       </div>
 
+      <!-- Response format -->
+      <div>
+        <div class="section-label">Формат ответа</div>
+
+        <div class="field" style="margin-bottom:12px">
+          <label>Шаблон</label>
+          <select id="formatPreset">
+            <option value="">— выберите или опишите ниже —</option>
+            <option value="Ответь строго в формате JSON, без пояснений.">JSON</option>
+            <option value="Используй Markdown-форматирование: заголовки, списки, блоки кода.">Markdown</option>
+            <option value="Отвечай простым текстом, без форматирования и разметки.">Простой текст</option>
+            <option value="Оформи ответ нумерованным списком.">Нумерованный список</option>
+            <option value="Оформи ответ маркированным списком.">Маркированный список</option>
+            <option value="Верни только код без каких-либо пояснений.">Только код</option>
+          </select>
+        </div>
+
+        <div class="field" style="margin-bottom:12px">
+          <label>Описание формата</label>
+          <textarea id="formatDesc" rows="2" placeholder="Опишите желаемый формат ответа..."></textarea>
+          <div style="font-size:0.72rem;color:#475569;margin-top:2px">Добавляется к системному промпту</div>
+        </div>
+
+        <div class="field" style="margin-bottom:12px">
+          <label>Ограничение длины</label>
+          <input type="text" id="lengthLimit" placeholder='напр. "3 предложения" или "100 слов"' />
+          <div style="font-size:0.72rem;color:#475569;margin-top:2px">Явное указание в промпте</div>
+        </div>
+
+        <div class="field">
+          <label>Инструкция завершения</label>
+          <input type="text" id="completionInstr" placeholder='напр. "Заверши ответ словом [КОНЕЦ]"' />
+          <div style="font-size:0.72rem;color:#475569;margin-top:2px">Дополняет Stop sequences ниже</div>
+        </div>
+      </div>
+
       <!-- Stop sequences -->
       <div>
         <div class="section-label">Stop sequences</div>
@@ -383,20 +422,6 @@
         </div>
       </div>
 
-      <!-- Thinking mode -->
-      <div>
-        <div class="section-label">Расширенное мышление</div>
-        <div class="toggle-row">
-          <span class="toggle-label">Adaptive Thinking (Opus/Sonnet 4.6)</span>
-          <label class="toggle">
-            <input type="checkbox" id="thinking" />
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div style="font-size:0.72rem;color:#475569;margin-top:6px">
-          Модель сама решает, когда «думать»
-        </div>
-      </div>
     </aside>
 
     <!-- MAIN: prompt + response -->
@@ -413,6 +438,11 @@
   </div>
 
   <script>
+    // ── Format preset → populate textarea ──
+    document.getElementById("formatPreset").addEventListener("change", function () {
+      if (this.value) document.getElementById("formatDesc").value = this.value;
+    });
+
     // ── Sliders live-update labels ──
     const temperature = document.getElementById("temperature");
     const topP = document.getElementById("topP");
@@ -450,16 +480,30 @@
         ? stopSeqRaw.split(",").map(s => s.trim()).filter(Boolean)
         : [];
 
+      // Build format block → prepend to system prompt (top = higher priority for the model)
+      let formatBlock = "";
+      {
+        const lines = [];
+        const rawDesc = document.getElementById("formatDesc").value.trim();
+        const rawLen  = document.getElementById("lengthLimit").value.trim();
+        const rawComp = document.getElementById("completionInstr").value.trim();
+        if (rawDesc) lines.push("Формат ответа: " + rawDesc + " Строго придерживайся этого формата.");
+        if (rawLen)  lines.push("Длина ответа: строго не более " + rawLen + ". Не превышай этот лимит ни при каких обстоятельствах.");
+        if (rawComp) lines.push("Условие завершения: " + rawComp + " Обязательно выполни это условие.");
+        if (lines.length) formatBlock = "ОБЯЗАТЕЛЬНЫЕ ИНСТРУКЦИИ ПО ОТВЕТУ:\n" + lines.join("\n") + "\n\n";
+      }
+      const systemRaw = document.getElementById("system").value.trim();
+      const systemFinal = (formatBlock + systemRaw).trim() || undefined;
+
       const body = {
         model: document.getElementById("model").value,
         prompt,
-        system: document.getElementById("system").value.trim() || undefined,
+        system: systemFinal,
         temperature: temperature.value,
         max_tokens: parseInt(maxTokens.value) || 1024,
         top_p: topP.value,
         top_k: topK.value ? parseInt(topK.value) : undefined,
         stop_sequences: stopSeqs.length ? stopSeqs : undefined,
-        thinking: document.getElementById("thinking").checked,
       };
 
       // UI containers
