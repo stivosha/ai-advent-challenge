@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude API Playground</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #1a1d2e;
+      border-bottom: 1px solid #2d3048;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header h1 {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #c084fc;
+    }
+
+    header span {
+      font-size: 0.8rem;
+      color: #64748b;
+      background: #1e2235;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .layout {
+      display: flex;
+      flex: 1;
+      height: calc(100vh - 57px);
+      overflow: hidden;
+    }
+
+    /* ── SIDEBAR ── */
+    .sidebar {
+      width: 320px;
+      min-width: 260px;
+      background: #13162a;
+      border-right: 1px solid #2d3048;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .section-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #6366f1;
+      margin-bottom: 8px;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+
+    label {
+      font-size: 0.82rem;
+      color: #94a3b8;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    label span { color: #c084fc; font-weight: 600; }
+
+    select, input[type="number"], input[type="text"], textarea {
+      background: #1e2235;
+      border: 1px solid #2d3048;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 8px 10px;
+      font-size: 0.85rem;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    select:focus, input:focus, textarea:focus {
+      border-color: #6366f1;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: #6366f1;
+      cursor: pointer;
+    }
+
+    .range-row { display: flex; align-items: center; gap: 8px; }
+    .range-row input[type="range"] { flex: 1; }
+    .range-row .val {
+      min-width: 38px;
+      text-align: right;
+      font-size: 0.82rem;
+      color: #c084fc;
+      font-weight: 600;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .toggle-label { font-size: 0.82rem; color: #94a3b8; }
+
+    .toggle {
+      position: relative;
+      width: 40px;
+      height: 22px;
+    }
+
+    .toggle input { opacity: 0; width: 0; height: 0; }
+
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: #2d3048;
+      border-radius: 11px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .toggle-slider::before {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      background: #fff;
+      border-radius: 50%;
+      top: 3px;
+      left: 3px;
+      transition: transform 0.2s;
+    }
+
+    .toggle input:checked + .toggle-slider { background: #6366f1; }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(18px); }
+
+    /* ── MAIN ── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .prompt-area {
+      padding: 16px;
+      border-bottom: 1px solid #2d3048;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    #prompt {
+      flex: 1;
+      min-height: 80px;
+      max-height: 200px;
+      resize: vertical;
+      background: #1e2235;
+      border: 1px solid #2d3048;
+      border-radius: 10px;
+      color: #e2e8f0;
+      padding: 10px 12px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+      font-family: inherit;
+    }
+
+    #prompt:focus { border-color: #6366f1; }
+
+    #sendBtn {
+      padding: 10px 22px;
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+
+    #sendBtn:hover:not(:disabled) { background: #4f46e5; }
+    #sendBtn:active:not(:disabled) { transform: scale(0.97); }
+    #sendBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .response-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .placeholder {
+      text-align: center;
+      color: #3d4460;
+      font-size: 0.9rem;
+      margin-top: 40px;
+    }
+
+    .thinking-block {
+      background: #1a1d2e;
+      border: 1px solid #3d4460;
+      border-radius: 10px;
+      padding: 14px;
+    }
+
+    .thinking-block .block-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #a78bfa;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .thinking-block .block-title::before {
+      content: "🧠";
+      font-size: 0.8rem;
+    }
+
+    .thinking-content {
+      font-size: 0.82rem;
+      color: #64748b;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .response-block {
+      background: #1e2235;
+      border: 1px solid #2d3048;
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    .response-block .block-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #6366f1;
+      margin-bottom: 10px;
+    }
+
+    .response-text {
+      font-size: 0.92rem;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .meta-bar {
+      display: flex;
+      gap: 16px;
+      font-size: 0.75rem;
+      color: #475569;
+      flex-wrap: wrap;
+    }
+
+    .meta-bar span { display: flex; align-items: center; gap: 4px; }
+    .meta-bar strong { color: #94a3b8; }
+
+    .error-block {
+      background: #2a1a1a;
+      border: 1px solid #6b2d2d;
+      border-radius: 10px;
+      padding: 14px;
+      color: #f87171;
+      font-size: 0.85rem;
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1em;
+      background: #6366f1;
+      vertical-align: text-bottom;
+      animation: blink 0.9s step-end infinite;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2d3048; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3d4460; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Claude API Playground</h1>
+    <span>Day 1</span>
+  </header>
+
+  <div class="layout">
+    <!-- SIDEBAR: settings -->
+    <aside class="sidebar">
+      <!-- Model -->
+      <div>
+        <div class="section-label">Модель</div>
+        <div class="field">
+          <select id="model">
+            <option value="claude-opus-4-6">claude-opus-4-6 (умнейшая)</option>
+            <option value="claude-sonnet-4-6">claude-sonnet-4-6 (баланс)</option>
+            <option value="claude-haiku-4-5">claude-haiku-4-5 (быстрая)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Generation params -->
+      <div>
+        <div class="section-label">Параметры генерации</div>
+
+        <div class="field" style="margin-bottom:12px">
+          <label>Temperature <span id="tempVal">—</span></label>
+          <div class="range-row">
+            <input type="range" id="temperature" min="0" max="1" step="0.01" value="1" />
+            <span class="val" id="tempDisplay">1.0</span>
+          </div>
+          <div style="font-size:0.72rem;color:#475569;margin-top:2px">
+            0 = детерминированный · 1 = творческий
+          </div>
+        </div>
+
+        <div class="field" style="margin-bottom:12px">
+          <label>Max tokens <span id="tokensVal">1024</span></label>
+          <input type="number" id="maxTokens" min="1" max="128000" value="1024" />
+        </div>
+
+        <div class="field" style="margin-bottom:12px">
+          <label>Top-P <span id="topPVal">—</span></label>
+          <div class="range-row">
+            <input type="range" id="topP" min="0" max="1" step="0.01" value="1" />
+            <span class="val" id="topPDisplay">1.0</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Top-K <span id="topKVal">—</span></label>
+          <input type="number" id="topK" min="1" max="2048" placeholder="не задан" />
+        </div>
+      </div>
+
+      <!-- Stop sequences -->
+      <div>
+        <div class="section-label">Stop sequences</div>
+        <div class="field">
+          <input type="text" id="stopSeq" placeholder='через запятую, напр. "END, STOP"' />
+          <div style="font-size:0.72rem;color:#475569">Разделитель: запятая</div>
+        </div>
+      </div>
+
+      <!-- System prompt -->
+      <div>
+        <div class="section-label">System prompt</div>
+        <div class="field">
+          <textarea id="system" rows="4" placeholder="Вы — полезный ассистент..."></textarea>
+        </div>
+      </div>
+
+      <!-- Thinking mode -->
+      <div>
+        <div class="section-label">Расширенное мышление</div>
+        <div class="toggle-row">
+          <span class="toggle-label">Adaptive Thinking (Opus/Sonnet 4.6)</span>
+          <label class="toggle">
+            <input type="checkbox" id="thinking" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div style="font-size:0.72rem;color:#475569;margin-top:6px">
+          Модель сама решает, когда «думать»
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN: prompt + response -->
+    <div class="main">
+      <div class="prompt-area">
+        <textarea id="prompt" placeholder="Введите сообщение..."></textarea>
+        <button id="sendBtn">Отправить ▶</button>
+      </div>
+
+      <div class="response-area" id="responseArea">
+        <div class="placeholder">Введите сообщение и нажмите «Отправить»</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── Sliders live-update labels ──
+    const temperature = document.getElementById("temperature");
+    const topP = document.getElementById("topP");
+    const maxTokens = document.getElementById("maxTokens");
+    const topK = document.getElementById("topK");
+
+    temperature.addEventListener("input", () => {
+      document.getElementById("tempDisplay").textContent = parseFloat(temperature.value).toFixed(2);
+    });
+    topP.addEventListener("input", () => {
+      document.getElementById("topPDisplay").textContent = parseFloat(topP.value).toFixed(2);
+    });
+    maxTokens.addEventListener("input", () => {
+      document.getElementById("tokensVal").textContent = maxTokens.value;
+    });
+
+    // ── Send ──
+    const sendBtn = document.getElementById("sendBtn");
+    const responseArea = document.getElementById("responseArea");
+
+    sendBtn.addEventListener("click", send);
+    document.getElementById("prompt").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
+    });
+
+    async function send() {
+      const prompt = document.getElementById("prompt").value.trim();
+      if (!prompt) return;
+
+      sendBtn.disabled = true;
+      responseArea.innerHTML = "";
+
+      const stopSeqRaw = document.getElementById("stopSeq").value.trim();
+      const stopSeqs = stopSeqRaw
+        ? stopSeqRaw.split(",").map(s => s.trim()).filter(Boolean)
+        : [];
+
+      const body = {
+        model: document.getElementById("model").value,
+        prompt,
+        system: document.getElementById("system").value.trim() || undefined,
+        temperature: temperature.value,
+        max_tokens: parseInt(maxTokens.value) || 1024,
+        top_p: topP.value,
+        top_k: topK.value ? parseInt(topK.value) : undefined,
+        stop_sequences: stopSeqs.length ? stopSeqs : undefined,
+        thinking: document.getElementById("thinking").checked,
+      };
+
+      // UI containers
+      let thinkingEl = null;
+      let thinkingContent = null;
+      let responseEl = null;
+      let responseText = null;
+      let cursor = null;
+      let metaEl = null;
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+
+          const parts = buf.split("\n\n");
+          buf = parts.pop();
+
+          for (const part of parts) {
+            const line = part.replace(/^data: /, "").trim();
+            if (!line) continue;
+
+            let evt;
+            try { evt = JSON.parse(line); } catch { continue; }
+
+            if (evt.type === "thinking_start") {
+              thinkingEl = document.createElement("div");
+              thinkingEl.className = "thinking-block";
+              thinkingEl.innerHTML = `<div class="block-title">Размышление</div>`;
+              thinkingContent = document.createElement("div");
+              thinkingContent.className = "thinking-content";
+              thinkingEl.appendChild(thinkingContent);
+              responseArea.appendChild(thinkingEl);
+            }
+
+            if (evt.type === "thinking_delta" && thinkingContent) {
+              thinkingContent.textContent += evt.text;
+              thinkingContent.scrollTop = thinkingContent.scrollHeight;
+            }
+
+            if (evt.type === "text_start") {
+              responseEl = document.createElement("div");
+              responseEl.className = "response-block";
+              responseEl.innerHTML = `<div class="block-title">Ответ</div>`;
+              responseText = document.createElement("div");
+              responseText.className = "response-text";
+              cursor = document.createElement("span");
+              cursor.className = "cursor";
+              responseText.appendChild(cursor);
+              responseEl.appendChild(responseText);
+              responseArea.appendChild(responseEl);
+            }
+
+            if (evt.type === "text_delta" && responseText) {
+              responseText.insertBefore(document.createTextNode(evt.text), cursor);
+              responseArea.scrollTop = responseArea.scrollHeight;
+            }
+
+            if (evt.type === "usage") {
+              if (cursor) cursor.remove();
+              // Add meta bar
+              metaEl = document.createElement("div");
+              metaEl.className = "meta-bar";
+              metaEl.innerHTML = `
+                <span>⬆ in: <strong>${evt.input_tokens}</strong></span>
+                <span>⬇ out: <strong>${evt.output_tokens}</strong></span>
+                <span>💎 модель: <strong>${body.model}</strong></span>
+              `;
+              if (responseEl) responseEl.appendChild(metaEl);
+              else responseArea.appendChild(metaEl);
+            }
+
+            if (evt.type === "error") {
+              if (cursor) cursor.remove();
+              const errEl = document.createElement("div");
+              errEl.className = "error-block";
+              errEl.textContent = "❌ " + evt.message;
+              responseArea.appendChild(errEl);
+            }
+          }
+        }
+      } catch (err) {
+        if (cursor) cursor.remove();
+        const errEl = document.createElement("div");
+        errEl.className = "error-block";
+        errEl.textContent = "❌ " + err.message;
+        responseArea.appendChild(errEl);
+      } finally {
+        if (cursor) cursor.remove();
+        sendBtn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
