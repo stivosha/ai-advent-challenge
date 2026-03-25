@@ -13,6 +13,9 @@ node_modules/
 *.log
 npm-debug.log*
 
+# History
+history.json
+
 # OS
 .DS_Store
 Thumbs.db

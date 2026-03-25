@@ -1,4 +1,7 @@
 import { randomUUID } from "crypto";
+import { readFileSync, writeFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
 // GigaChat uses a certificate signed by Russian NCA — disable TLS verification for dev.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -11,6 +14,22 @@ const CONFIG = {
   max_tokens:  1024,
   top_p:       0.9,
 };
+
+// ─── Persistent history ────────────────────────────────────────────────────────
+const __dir = dirname(fileURLToPath(import.meta.url));
+const HISTORY_FILE = join(__dir, "history.json");
+
+function loadHistory() {
+  try {
+    return JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(messages) {
+  writeFileSync(HISTORY_FILE, JSON.stringify(messages, null, 2), "utf8");
+}
 
 const GIGACHAT_AUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth";
 const GIGACHAT_CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions";
@@ -49,9 +68,12 @@ async function getAccessToken() {
 export async function ask(userQuery) {
   if (!userQuery?.trim()) throw new Error("Query must not be empty");
 
+  const history = loadHistory();
+  history.push({ role: "user", content: userQuery });
+
   const messages = [
     { role: "system", content: CONFIG.system },
-    { role: "user",   content: userQuery },
+    ...history,
   ];
 
   const payload = {
@@ -104,15 +126,28 @@ export async function ask(userQuery) {
     }
   }
 
+  history.push({ role: "assistant", content: result });
+  saveHistory(history);
+
   return result;
 }
 
 // ─── CLI entry point ───────────────────────────────────────────────────────────
 // Usage: node agent.js "Твой вопрос здесь"
+//        node agent.js --clear   (сбросить историю)
 if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1].replace(/\\/g, "/"))) {
-  const query = process.argv.slice(2).join(" ");
+  const args = process.argv.slice(2);
+
+  if (args[0] === "--clear") {
+    saveHistory([]);
+    console.log("История очищена.");
+    process.exit(0);
+  }
+
+  const query = args.join(" ");
   if (!query) {
     console.error("Usage: node agent.js \"<your question>\"");
+    console.error("       node agent.js --clear");
     process.exit(1);
   }
 
