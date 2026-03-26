@@ -19,16 +19,21 @@ const CONFIG = {
 const __dir = dirname(fileURLToPath(import.meta.url));
 const HISTORY_FILE = join(__dir, "history.json");
 
-function loadHistory() {
+function loadSession() {
   try {
-    return JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
+    const raw = JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
+    // Migrate old format (plain array) → new format
+    if (Array.isArray(raw)) {
+      return { messages: raw, totalTokens: 0, requests: [] };
+    }
+    return raw;
   } catch {
-    return [];
+    return { messages: [], totalTokens: 0, requests: [] };
   }
 }
 
-function saveHistory(messages) {
-  writeFileSync(HISTORY_FILE, JSON.stringify(messages, null, 2), "utf8");
+function saveSession(session) {
+  writeFileSync(HISTORY_FILE, JSON.stringify(session, null, 2), "utf8");
 }
 
 const GIGACHAT_AUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth";
@@ -68,12 +73,12 @@ async function getAccessToken() {
 export async function ask(userQuery) {
   if (!userQuery?.trim()) throw new Error("Query must not be empty");
 
-  const history = loadHistory();
-  history.push({ role: "user", content: userQuery });
+  const session = loadSession();
+  session.messages.push({ role: "user", content: userQuery });
 
   const messages = [
     { role: "system", content: CONFIG.system },
-    ...history,
+    ...session.messages,
   ];
 
   const payload = {
@@ -97,11 +102,12 @@ export async function ask(userQuery) {
 
   if (!apiRes.ok) throw new Error(`GigaChat API error: ${apiRes.status} ${await apiRes.text()}`);
 
-  // Stream → collect full text
+  // Stream → collect full text + usage from last chunk
   const reader  = apiRes.body.getReader();
   const decoder = new TextDecoder();
   let buf    = "";
   let result = "";
+  let usage  = null;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -123,13 +129,35 @@ export async function ask(userQuery) {
 
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) result += delta;
+
+      // GigaChat sends usage in the last non-[DONE] chunk
+      if (chunk.usage) usage = chunk.usage;
     }
   }
 
-  history.push({ role: "assistant", content: result });
-  saveHistory(history);
+  session.messages.push({ role: "assistant", content: result });
+
+  // Record token usage for this request
+  const requestEntry = {
+    timestamp:        new Date().toISOString(),
+    promptTokens:     usage?.prompt_tokens     ?? null,
+    completionTokens: usage?.completion_tokens ?? null,
+    totalTokens:      usage?.total_tokens      ?? null,
+  };
+  session.requests.push(requestEntry);
+  if (usage?.total_tokens) {
+    session.totalTokens += usage.total_tokens;
+  }
+
+  saveSession(session);
 
   return result;
+}
+
+// ─── Token stats helper ────────────────────────────────────────────────────────
+export function getTokenStats() {
+  const { totalTokens, requests } = loadSession();
+  return { totalTokens, requests };
 }
 
 // ─── CLI entry point ───────────────────────────────────────────────────────────
@@ -139,8 +167,18 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
   const args = process.argv.slice(2);
 
   if (args[0] === "--clear") {
-    saveHistory([]);
+    saveSession({ messages: [], totalTokens: 0, requests: [] });
     console.log("История очищена.");
+    process.exit(0);
+  }
+
+  if (args[0] === "--stats") {
+    const { totalTokens, requests } = getTokenStats();
+    console.log(`Токенов за сессию: ${totalTokens}`);
+    console.log(`Запросов: ${requests.length}`);
+    requests.forEach((r, i) => {
+      console.log(`  [${i + 1}] ${r.timestamp}  prompt=${r.promptTokens ?? "?"}  completion=${r.completionTokens ?? "?"}  total=${r.totalTokens ?? "?"}`);
+    });
     process.exit(0);
   }
 
@@ -152,6 +190,13 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
   }
 
   ask(query)
-    .then((answer) => console.log(answer))
-    .catch((err)   => { console.error(err.message); process.exit(1); });
+    .then((answer) => {
+      console.log(answer);
+      const { totalTokens, requests } = getTokenStats();
+      const last = requests.at(-1);
+      if (last?.totalTokens != null) {
+        console.log(`\n[токены запроса: ${last.totalTokens} | сессия: ${totalTokens}]`);
+      }
+    })
+    .catch((err) => { console.error(err.message); process.exit(1); });
 }
