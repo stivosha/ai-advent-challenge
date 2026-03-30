@@ -13,6 +13,7 @@ const CONFIG = {
   temperature: 0.7,
   max_tokens:  1024,
   top_p:       0.9,
+  keepRecent:  2, // сколько последних сообщений оставлять несжатыми
 };
 
 // ─── Persistent history ────────────────────────────────────────────────────────
@@ -24,11 +25,11 @@ function loadSession() {
     const raw = JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
     // Migrate old format (plain array) → new format
     if (Array.isArray(raw)) {
-      return { messages: raw, totalTokens: 0, requests: [] };
+      return { messages: raw, summary: null, totalTokens: 0, requests: [] };
     }
-    return raw;
+    return { summary: null, ...raw };
   } catch {
-    return { messages: [], totalTokens: 0, requests: [] };
+    return { messages: [], summary: null, totalTokens: 0, requests: [] };
   }
 }
 
@@ -69,6 +70,50 @@ async function getAccessToken() {
   return cachedToken;
 }
 
+// ─── Summarize a list of messages via GigaChat ─────────────────────────────────
+async function summarizeMessages(messages, existingSummary) {
+  const token = await getAccessToken();
+
+  const dialog = messages
+    .map(m => `${m.role === "user" ? "Пользователь" : "Ассистент"}: ${m.content}`)
+    .join("\n\n");
+
+  const userContent = existingSummary
+    ? `Обнови краткое резюме диалога, добавив новые сообщения. Сохрани все важные факты и контекст.\n\nТекущее резюме:\n${existingSummary}\n\nНовые сообщения:\n${dialog}`
+    : `Создай краткое резюме следующего диалога, сохранив все важные факты и контекст:\n\n${dialog}`;
+
+  const res = await fetch(GIGACHAT_CHAT_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type":  "application/json",
+    },
+    body: JSON.stringify({
+      model:       CONFIG.model,
+      messages:    [
+        { role: "system", content: "Ты — помощник, создающий краткие резюме диалогов." },
+        { role: "user",   content: userContent },
+      ],
+      temperature: 0.3,
+      max_tokens:  512,
+    }),
+  });
+
+  if (!res.ok) throw new Error(`GigaChat summarize error: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+
+// ─── Compress old messages, keeping only the last N ───────────────────────────
+async function compressHistory(session) {
+  const { messages } = session;
+  if (messages.length <= CONFIG.keepRecent) return;
+
+  const toCompress = messages.slice(0, messages.length - CONFIG.keepRecent);
+  session.summary  = await summarizeMessages(toCompress, session.summary ?? null);
+  session.messages = messages.slice(messages.length - CONFIG.keepRecent);
+}
+
 // ─── Core: send query, return full response text ───────────────────────────────
 export async function ask(userQuery) {
   if (!userQuery?.trim()) throw new Error("Query must not be empty");
@@ -76,8 +121,12 @@ export async function ask(userQuery) {
   const session = loadSession();
   session.messages.push({ role: "user", content: userQuery });
 
+  const systemContent = session.summary
+    ? `${CONFIG.system}\n\nКраткое содержание предыдущего диалога:\n${session.summary}`
+    : CONFIG.system;
+
   const messages = [
-    { role: "system", content: CONFIG.system },
+    { role: "system", content: systemContent },
     ...session.messages,
   ];
 
@@ -137,6 +186,9 @@ export async function ask(userQuery) {
 
   session.messages.push({ role: "assistant", content: result });
 
+  // Compress old messages if history exceeds keepRecent
+  await compressHistory(session);
+
   // Record token usage for this request
   const requestEntry = {
     timestamp:        new Date().toISOString(),
@@ -169,6 +221,17 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
   if (args[0] === "--clear") {
     saveSession({ messages: [], totalTokens: 0, requests: [] });
     console.log("История очищена.");
+    process.exit(0);
+  }
+
+  if (args[0] === "--summary") {
+    const { summary } = loadSession();
+    if (summary) {
+      console.log("Текущее резюме истории:\n");
+      console.log(summary);
+    } else {
+      console.log("Резюме ещё нет (история не сжималась).");
+    }
     process.exit(0);
   }
 
