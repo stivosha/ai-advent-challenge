@@ -16,6 +16,20 @@ const CONFIG = {
   keepRecent:  6, // window size used by all strategies
 };
 
+// ─── User profile schema ────────────────────────────────────────────────────────
+// Defines supported profile fields with human-readable descriptions.
+// Stored in memory.json → profile (key-value).
+const PROFILE_FIELDS = {
+  name:        "Имя пользователя",
+  role:        "Роль / должность",
+  domain:      "Область работы (например: backend, ML, DevOps)",
+  style:       "Стиль общения: formal | casual | technical",
+  format:      "Формат ответов: short | detailed | bullets | code-first",
+  language:    "Язык ответов (например: ru, en)",
+  constraints: "Что НЕ нужно делать (ограничения)",
+  goals:       "Текущий контекст / цели проекта",
+};
+
 // ─── File paths ────────────────────────────────────────────────────────────────
 const __dir = dirname(fileURLToPath(import.meta.url));
 const HISTORY_FILE = join(__dir, "history.json");
@@ -84,6 +98,44 @@ function longTermToText(lt) {
   }
 
   return lines.join("\n");
+}
+
+// Build a personalized system prompt from the user profile.
+// Translates profile fields into concrete behavioral instructions for the model.
+function buildPersonalizedSystem(lt) {
+  const p = lt.profile ?? {};
+  let system = CONFIG.system;
+
+  const instructions = [];
+
+  if (p.name)   instructions.push(`Пользователя зовут ${p.name}.`);
+  if (p.role)   instructions.push(`Его роль: ${p.role}.`);
+  if (p.domain) instructions.push(`Область работы: ${p.domain}.`);
+
+  const styleMap = {
+    formal:    "Общайся формально и профессионально.",
+    casual:    "Общайся неформально и дружелюбно.",
+    technical: "Предпочитай технические термины, избегай чрезмерных упрощений.",
+  };
+  if (p.style && styleMap[p.style]) instructions.push(styleMap[p.style]);
+
+  const formatMap = {
+    short:        "Давай максимально краткие ответы — только суть.",
+    detailed:     "Давай подробные, развёрнутые ответы с объяснениями.",
+    bullets:      "Структурируй ответы списками и пунктами.",
+    "code-first": "При любой возможности давай рабочий код, текста — минимум.",
+  };
+  if (p.format && formatMap[p.format]) instructions.push(formatMap[p.format]);
+
+  if (p.language && p.language !== "ru") instructions.push(`Отвечай на языке: ${p.language}.`);
+  if (p.constraints) instructions.push(`Ограничения: ${p.constraints}.`);
+  if (p.goals)       instructions.push(`Контекст проекта: ${p.goals}.`);
+
+  if (instructions.length) {
+    system += "\n\n[Персонализация]\n" + instructions.join("\n");
+  }
+
+  return system;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -359,8 +411,8 @@ ${dialog}
 function buildContext(session, longTerm) {
   const { strategy } = session;
 
-  // Build layered system prompt
-  const parts = [CONFIG.system];
+  // Build layered system prompt (base + personalization from profile)
+  const parts = [buildPersonalizedSystem(longTerm)];
 
   // Layer 3: long-term memory
   const ltText = longTermToText(longTerm);
@@ -707,6 +759,80 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
     process.exit(1);
   }
 
+  // ── --profile  User profile management ───────────────────────────────────────
+  if (args[0] === "--profile") {
+    const sub = args[1];
+    const lt  = loadLongTerm();
+
+    // --profile show  Display current profile with field descriptions
+    if (sub === "show") {
+      const p = lt.profile ?? {};
+      console.log("[ Профиль пользователя ]\n");
+      Object.entries(PROFILE_FIELDS).forEach(([field, desc]) => {
+        const val = p[field] ?? "(не задано)";
+        console.log(`  ${field.padEnd(12)} ${val}`);
+        console.log(`               └─ ${desc}`);
+      });
+      if (Object.keys(p).length === 0) console.log("\n  Профиль пуст. Используйте: --profile set <поле> <значение>");
+      process.exit(0);
+    }
+
+    // --profile set <field> <value>  Set a profile field (validated against schema)
+    if (sub === "set") {
+      const field = args[2];
+      const value = args.slice(3).join(" ");
+      if (!field || !value) {
+        console.error("Использование: --profile set <поле> <значение>");
+        process.exit(1);
+      }
+      if (!PROFILE_FIELDS[field]) {
+        console.error(`Неизвестное поле "${field}". Доступные поля:\n  ${Object.keys(PROFILE_FIELDS).join(", ")}`);
+        process.exit(1);
+      }
+      // Validate enum fields
+      if (field === "style"  && !["formal", "casual", "technical"].includes(value)) {
+        console.error('style: допустимые значения — formal | casual | technical');
+        process.exit(1);
+      }
+      if (field === "format" && !["short", "detailed", "bullets", "code-first"].includes(value)) {
+        console.error('format: допустимые значения — short | detailed | bullets | code-first');
+        process.exit(1);
+      }
+      lt.profile[field] = value;
+      saveLongTerm(lt);
+      console.log(`Профиль обновлён: ${field} = ${value}`);
+      process.exit(0);
+    }
+
+    // --profile clear  Wipe the profile (keep knowledge/decisions)
+    if (sub === "clear") {
+      lt.profile = {};
+      saveLongTerm(lt);
+      console.log("Профиль пользователя очищен.");
+      process.exit(0);
+    }
+
+    const fieldHelp = Object.entries(PROFILE_FIELDS)
+      .map(([f, d]) => `    ${f.padEnd(12)} ${d}`)
+      .join("\n");
+    console.error([
+      "Управление профилем пользователя (влияет на каждый запрос):",
+      "  --profile show                Показать текущий профиль",
+      "  --profile set <поле> <знач.>  Установить поле профиля",
+      "  --profile clear               Очистить профиль",
+      "",
+      "Поля профиля:",
+      fieldHelp,
+      "",
+      "Примеры:",
+      '  node agent.js --profile set name "Иван"',
+      '  node agent.js --profile set style technical',
+      '  node agent.js --profile set format bullets',
+      '  node agent.js --profile set language en',
+    ].join("\n"));
+    process.exit(1);
+  }
+
   // ── --strategy ────────────────────────────────────────────────────────────────
   if (args[0] === "--strategy") {
     const name  = args[1];
@@ -923,13 +1049,18 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
 
     // Layer 3: long-term memory
     console.log("\n[ Слой 3: Долгосрочная память ]");
-    const profileN  = Object.keys(longTerm.profile   ?? {}).length;
-    const knowledgeN= Object.keys(longTerm.knowledge ?? {}).length;
-    const decisionsN= (longTerm.decisions ?? []).length;
-    if (profileN + knowledgeN + decisionsN === 0) {
+    const profileEntries = Object.entries(longTerm.profile   ?? {});
+    const knowledgeN     = Object.keys(longTerm.knowledge ?? {}).length;
+    const decisionsN     = (longTerm.decisions ?? []).length;
+    if (profileEntries.length + knowledgeN + decisionsN === 0) {
       console.log("  (пусто)");
     } else {
-      console.log(`  Профиль: ${profileN} записей`);
+      if (profileEntries.length) {
+        console.log(`  Профиль (${profileEntries.length} полей):`);
+        profileEntries.forEach(([k, v]) => console.log(`    ${k}: ${v}`));
+      } else {
+        console.log("  Профиль: (не задан — используйте --profile set)");
+      }
       console.log(`  Знания:  ${knowledgeN} записей`);
       console.log(`  Решения: ${decisionsN}`);
       if (longTerm.updatedAt) console.log(`  Обновлено: ${longTerm.updatedAt}`);
@@ -957,6 +1088,11 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
       "  --wm set <ключ> <значение>           Сохранить переменную",
       "  --wm note <текст>                    Добавить заметку",
       "  --wm clear                           Очистить рабочую память",
+      "",
+      "  Профиль пользователя (персонализация каждого запроса):",
+      "  --profile show                       Показать профиль",
+      "  --profile set <поле> <значение>      Установить поле профиля",
+      "  --profile clear                      Очистить профиль",
       "",
       "  Долгосрочная память (между сессиями):",
       "  --mem list                           Показать долгосрочную память",
