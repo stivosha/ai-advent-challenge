@@ -15,9 +15,10 @@ const CONFIG = {
 };
 
 // ─── File paths ────────────────────────────────────────────────────────────────
-const __dir       = dirname(fileURLToPath(import.meta.url));
-const TASK_FILE   = join(__dir, "task.json");
-const HISTORY_FILE = join(__dir, "history.json");
+const __dir            = dirname(fileURLToPath(import.meta.url));
+const TASK_FILE        = join(__dir, "task.json");
+const HISTORY_FILE     = join(__dir, "history.json");
+const INVARIANTS_FILE  = join(__dir, "invariants.json");
 
 // ══════════════════════════════════════════════════════════════════════════════
 // КОНЕЧНЫЙ АВТОМАТ (FSM) — СОСТОЯНИЕ ЗАДАЧИ
@@ -189,6 +190,105 @@ function autoAdvanceFSM(task, assistantReply) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ИНВАРИАНТЫ
+//
+// Инварианты — это жёсткие ограничения проекта, которые ассистент обязан
+// учитывать и не имеет права предлагать решения, их нарушающие.
+//
+// Категории:
+//   architecture  — выбранная архитектура
+//   decision      — принятые технические решения
+//   stack         — ограничения по стеку технологий
+//   business      — бизнес-правила
+// ══════════════════════════════════════════════════════════════════════════════
+
+const INVARIANT_CATEGORIES = ["architecture", "decision", "stack", "business"];
+
+const CATEGORY_LABELS = {
+  architecture: "Архитектура",
+  decision:     "Технические решения",
+  stack:        "Стек технологий",
+  business:     "Бизнес-правила",
+};
+
+function defaultInvariants() {
+  return { items: [] };
+}
+
+function loadInvariants() {
+  try {
+    if (!existsSync(INVARIANTS_FILE)) return defaultInvariants();
+    const raw = JSON.parse(readFileSync(INVARIANTS_FILE, "utf8"));
+    const inv = defaultInvariants();
+    Object.assign(inv, raw);
+    if (!Array.isArray(inv.items)) inv.items = [];
+    return inv;
+  } catch {
+    return defaultInvariants();
+  }
+}
+
+function saveInvariants(inv) {
+  writeFileSync(INVARIANTS_FILE, JSON.stringify(inv, null, 2), "utf8");
+}
+
+// Форматирует инварианты для системного промпта
+function invariantsToSystemPrompt(inv) {
+  if (!inv.items.length) return "";
+
+  const grouped = {};
+  for (const item of inv.items) {
+    const cat = item.category ?? "decision";
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(item);
+  }
+
+  const lines = [
+    "━━━ ИНВАРИАНТЫ ПРОЕКТА (ЖЁСТКИЕ ОГРАНИЧЕНИЯ) ━━━",
+    "Следующие инварианты установлены для этого проекта.",
+    "Ты ОБЯЗАН явно учитывать их при планировании и выполнении.",
+    "Ты НЕ ИМЕЕШЬ ПРАВА предлагать решения, которые нарушают хотя бы один инвариант.",
+    "Если запрос пользователя противоречит инварианту — чётко укажи: какой инвариант нарушается и почему.",
+    "",
+  ];
+
+  for (const cat of INVARIANT_CATEGORIES) {
+    if (!grouped[cat]) continue;
+    lines.push(`[${CATEGORY_LABELS[cat]}]`);
+    grouped[cat].forEach((item, idx) => {
+      lines.push(`  ${idx + 1}. ${item.text}`);
+    });
+    lines.push("");
+  }
+
+  lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  return lines.join("\n");
+}
+
+// Форматирует инварианты для CLI вывода
+function invariantsToText(inv) {
+  if (!inv.items.length) return "Инварианты не заданы.";
+
+  const grouped = {};
+  for (const item of inv.items) {
+    const cat = item.category ?? "decision";
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(item);
+  }
+
+  const lines = ["[Инварианты проекта]"];
+  for (const cat of INVARIANT_CATEGORIES) {
+    if (!grouped[cat]) continue;
+    lines.push(`\n  ${CATEGORY_LABELS[cat]}:`);
+    grouped[cat].forEach(item => {
+      const at = item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "";
+      lines.push(`    #${item.id}  ${item.text}  (${at})`);
+    });
+  }
+  return lines.join("\n");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ИСТОРИЯ ДИАЛОГА
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -244,15 +344,23 @@ async function getAccessToken() {
 
 // ─── Сборка контекста для API ──────────────────────────────────────────────────
 // Системный промпт меняется в зависимости от текущего этапа FSM.
+// Инварианты инжектируются первым блоком — до инструкций фазы.
 function buildContext(history, task) {
   const phaseConfig = PHASE_PROMPTS[task.phase] ?? PHASE_PROMPTS.planning;
+  const inv = loadInvariants();
 
-  const systemParts = [phaseConfig.system];
+  const systemParts = [];
+
+  // Инварианты идут первыми — они главнее инструкций фазы
+  const invText = invariantsToSystemPrompt(inv);
+  if (invText) systemParts.push(invText);
+
+  systemParts.push(phaseConfig.system);
 
   const stateText = taskStateToText(task);
   if (stateText) systemParts.push("\n" + stateText);
 
-  const systemContent = systemParts.join("\n");
+  const systemContent = systemParts.join("\n\n");
 
   // Последние 10 сообщений для контекста
   const recent = history.messages.slice(-10);
@@ -483,6 +591,73 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
     process.exit(1);
   }
 
+  // ── --invariant  Управление инвариантами ──────────────────────────────────────
+  if (args[0] === "--invariant") {
+    const sub = args[1];
+
+    // --invariant add [--category <cat>] <текст>
+    if (sub === "add") {
+      const catIdx  = args.indexOf("--category");
+      let category  = catIdx !== -1 ? args[catIdx + 1] : "decision";
+      if (!INVARIANT_CATEGORIES.includes(category)) {
+        console.error(`Неизвестная категория: "${category}". Допустимые: ${INVARIANT_CATEGORIES.join(", ")}`);
+        process.exit(1);
+      }
+      // Текст — всё, что не является флагом
+      const textArgs = args.slice(2).filter((a, i, arr) =>
+        !(a.startsWith("--")) && !(arr[i - 1] === "--category")
+      );
+      const text = textArgs.join(" ").trim();
+      if (!text) {
+        console.error('Использование: --invariant add [--category <cat>] "<текст>"');
+        console.error(`Категории: ${INVARIANT_CATEGORIES.join(", ")}`);
+        process.exit(1);
+      }
+      const inv = loadInvariants();
+      const nextId = (inv.items.reduce((max, it) => Math.max(max, it.id ?? 0), 0)) + 1;
+      inv.items.push({ id: nextId, category, text, createdAt: new Date().toISOString() });
+      saveInvariants(inv);
+      console.log(`Инвариант #${nextId} добавлен [${CATEGORY_LABELS[category]}]: ${text}`);
+      process.exit(0);
+    }
+
+    // --invariant list
+    if (sub === "list") {
+      const inv = loadInvariants();
+      console.log(invariantsToText(inv));
+      process.exit(0);
+    }
+
+    // --invariant remove <id>
+    if (sub === "remove") {
+      const id  = parseInt(args[2], 10);
+      if (isNaN(id)) {
+        console.error("Использование: --invariant remove <id>");
+        process.exit(1);
+      }
+      const inv = loadInvariants();
+      const before = inv.items.length;
+      inv.items = inv.items.filter(it => it.id !== id);
+      if (inv.items.length === before) {
+        console.error(`Инвариант #${id} не найден.`);
+        process.exit(1);
+      }
+      saveInvariants(inv);
+      console.log(`Инвариант #${id} удалён.`);
+      process.exit(0);
+    }
+
+    console.error([
+      "Управление инвариантами:",
+      '  --invariant add [--category <cat>] "<текст>"   Добавить инвариант',
+      "  --invariant list                               Показать все инварианты",
+      "  --invariant remove <id>                        Удалить инвариант по ID",
+      "",
+      `  Категории: ${INVARIANT_CATEGORIES.join(", ")}`,
+    ].join("\n"));
+    process.exit(1);
+  }
+
   // ── --clear  Сбросить историю диалога (задача сохраняется) ───────────────────
   if (args[0] === "--clear") {
     saveHistory(defaultHistory());
@@ -496,13 +671,16 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
   if (!query.trim()) {
     console.error([
       "Использование:",
-      '  node agent.js "<вопрос>"                 Отправить сообщение агенту',
-      '  node agent.js --task new "<описание>"    Создать новую задачу',
-      "  node agent.js --task status              Статус задачи и FSM",
-      "  node agent.js --task advance             Перейти к следующему этапу",
-      "  node agent.js --task reset               Сбросить задачу",
-      "  node agent.js --task fsm                 Показать граф переходов",
-      "  node agent.js --clear                    Очистить историю диалога",
+      '  node agent.js "<вопрос>"                              Отправить сообщение агенту',
+      '  node agent.js --task new "<описание>"                 Создать новую задачу',
+      "  node agent.js --task status                           Статус задачи и FSM",
+      "  node agent.js --task advance                          Перейти к следующему этапу",
+      "  node agent.js --task reset                            Сбросить задачу",
+      "  node agent.js --task fsm                              Показать граф переходов",
+      '  node agent.js --invariant add [--category <cat>] "<текст>"  Добавить инвариант',
+      "  node agent.js --invariant list                        Показать инварианты",
+      "  node agent.js --invariant remove <id>                 Удалить инвариант",
+      "  node agent.js --clear                                 Очистить историю диалога",
     ].join("\n"));
     process.exit(1);
   }
