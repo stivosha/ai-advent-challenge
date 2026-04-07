@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "simple-agent": {
+      "command": "node",
+      "args": ["C:/Users/user/Documents/claude/mcp/simple-agent/server.js"]
+    }
+  }
+}
