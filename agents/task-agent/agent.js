@@ -20,6 +20,11 @@ const TASK_FILE        = join(__dir, "task.json");
 const HISTORY_FILE     = join(__dir, "history.json");
 const INVARIANTS_FILE  = join(__dir, "invariants.json");
 
+// Читает JSON-файл, устойчиво к UTF-8 BOM (0xFEFF), который добавляет PowerShell.
+function readJson(filePath) {
+  return JSON.parse(readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // КОНЕЧНЫЙ АВТОМАТ (FSM) — СОСТОЯНИЕ ЗАДАЧИ
 //
@@ -41,14 +46,42 @@ const FSM_TRANSITIONS = {
   done:       ["planning"],                 // planning — начать новую задачу
 };
 
+// Предусловия (guard-условия) для переходов FSM.
+// Каждая функция получает task и бросает Error, если переход запрещён.
+const TRANSITION_GUARDS = {
+  "planning->execution": (task) => {
+    if (!task.planApproved) {
+      throw new Error(
+        `Нельзя начать реализацию до утверждения плана.\n` +
+        `  Утвердите план командой: node agent.js --task approve-plan\n` +
+        `  Или скажите агенту: "начинаем выполнение" / "утверждаю план, выполняй"`
+      );
+    }
+  },
+  "validation->done": (task) => {
+    if (!task.validationPassed) {
+      throw new Error(
+        `Нельзя завершить задачу без успешной валидации.\n` +
+        `  Дождитесь, когда агент ответит "ВАЛИДАЦИЯ ПРОЙДЕНА".\n` +
+        `  Для тестирования без API: node agent.js --task mark-validated`
+      );
+    }
+  },
+};
+
 // Что ожидается на каждом этапе
 const PHASE_PROMPTS = {
   planning: {
     system: `Ты — агент-планировщик. Ты находишься на этапе ПЛАНИРОВАНИЯ.
 Твоя задача: разбить задачу пользователя на конкретные шаги.
 Сформируй чёткий план выполнения: пронумерованный список шагов.
-В конце ответа явно укажи: "ПЛАН ГОТОВ: <N> шагов"`,
-    expectedAction: "Сформировать план выполнения задачи",
+В конце ответа явно укажи: "ПЛАН ГОТОВ: <N> шагов"
+
+ВАЖНО: Переход к этапу ВЫПОЛНЕНИЕ возможен только после явного утверждения плана.
+После составления плана напомни пользователю: он должен явно утвердить план
+командой "--task approve-plan" или сказать "утверждаю план, начинаем выполнение".
+НЕ НАЧИНАЙ выполнение самостоятельно — только после команды пользователя.`,
+    expectedAction: "Сформировать план и ожидать его утверждения",
   },
   execution: {
     system: `Ты — агент-исполнитель. Ты находишься на этапе ВЫПОЛНЕНИЯ.
@@ -75,24 +108,26 @@ const PHASE_PROMPTS = {
 // ─── FSM: структура задачи ────────────────────────────────────────────────────
 function defaultTask() {
   return {
-    id:             null,
-    description:    null,
-    phase:          "planning",
-    step:           0,
-    totalSteps:     null,
-    expectedAction: PHASE_PROMPTS.planning.expectedAction,
-    plan:           [],           // шаги плана, заполняется на этапе planning
-    validationResult: null,       // результат последней валидации
-    createdAt:      null,
-    updatedAt:      null,
-    history:        [],           // лог переходов: { from, to, reason, at }
+    id:               null,
+    description:      null,
+    phase:            "planning",
+    step:             0,
+    totalSteps:       null,
+    expectedAction:   PHASE_PROMPTS.planning.expectedAction,
+    plan:             [],           // шаги плана, заполняется на этапе planning
+    planApproved:     false,        // guard: план должен быть утверждён перед execution
+    validationResult: null,         // результат последней валидации
+    validationPassed: false,        // guard: валидация должна быть пройдена перед done
+    createdAt:        null,
+    updatedAt:        null,
+    history:          [],           // лог переходов: { from, to, reason, at }
   };
 }
 
 function loadTask() {
   try {
     if (!existsSync(TASK_FILE)) return defaultTask();
-    const raw = JSON.parse(readFileSync(TASK_FILE, "utf8"));
+    const raw = readJson(TASK_FILE);
     const t = defaultTask();
     Object.assign(t, raw);
     if (!t.history)  t.history  = [];
@@ -118,6 +153,12 @@ function transition(task, toPhase, reason = "") {
     );
   }
 
+  // Проверяем guard-условие для этого перехода
+  const guardKey = `${task.phase}->${toPhase}`;
+  if (TRANSITION_GUARDS[guardKey]) {
+    TRANSITION_GUARDS[guardKey](task); // бросает Error если условие не выполнено
+  }
+
   task.history.push({
     from:   task.phase,
     to:     toPhase,
@@ -128,6 +169,12 @@ function transition(task, toPhase, reason = "") {
   task.phase          = toPhase;
   task.step           = 0;
   task.expectedAction = PHASE_PROMPTS[toPhase].expectedAction;
+
+  // При возврате в planning сбрасываем guard-флаги предыдущего цикла
+  if (toPhase === "planning") {
+    task.planApproved    = false;
+    task.validationPassed = false;
+  }
 }
 
 // ─── FSM: текстовое описание текущего состояния ───────────────────────────────
@@ -143,12 +190,20 @@ function taskStateToText(task) {
 
   if (task.description) lines.push(`  Задача:            ${task.description}`);
 
+  if (task.phase === "planning") {
+    lines.push(`  План утверждён:    ${task.planApproved ? "ДА ✓" : "НЕТ (нужно --task approve-plan)"}`);
+  }
+
   if (task.plan.length) {
     lines.push("  План:");
     task.plan.forEach((s, i) => {
       const marker = i < task.step ? "✓" : i === task.step ? "→" : " ";
       lines.push(`    ${marker} ${i + 1}. ${s}`);
     });
+  }
+
+  if (task.phase === "validation") {
+    lines.push(`  Валидация пройдена: ${task.validationPassed ? "ДА ✓" : "НЕТ (ожидание ответа агента)"}`);
   }
 
   if (task.validationResult) lines.push(`  Последняя валидация: ${task.validationResult}`);
@@ -181,9 +236,13 @@ function autoAdvanceFSM(task, assistantReply) {
 
   if (task.phase === "validation") {
     if (reply.includes("валидация пройдена")) {
+      task.validationPassed = true;  // guard: устанавливаем до вызова transition
+      task.validationResult = "Пройдена";
       transition(task, "done", "Валидация успешно пройдена");
     } else if (reply.includes("валидация не пройдена")) {
+      task.validationPassed = false;
       const reason = assistantReply.match(/валидация не пройдена[:\s]+(.+)/i)?.[1] ?? "";
+      task.validationResult = reason || "Не пройдена";
       transition(task, "execution", `Валидация не пройдена: ${reason}`);
     }
   }
@@ -218,7 +277,7 @@ function defaultInvariants() {
 function loadInvariants() {
   try {
     if (!existsSync(INVARIANTS_FILE)) return defaultInvariants();
-    const raw = JSON.parse(readFileSync(INVARIANTS_FILE, "utf8"));
+    const raw = readJson(INVARIANTS_FILE);
     const inv = defaultInvariants();
     Object.assign(inv, raw);
     if (!Array.isArray(inv.items)) inv.items = [];
@@ -299,7 +358,7 @@ function defaultHistory() {
 function loadHistory() {
   try {
     if (!existsSync(HISTORY_FILE)) return defaultHistory();
-    const raw = JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
+    const raw = readJson(HISTORY_FILE);
     const h = defaultHistory();
     Object.assign(h, raw);
     return h;
@@ -392,10 +451,18 @@ export async function ask(userQuery) {
     at:      new Date().toISOString(),
   });
 
-  // Если на этапе planning и пользователь прямо просит начать выполнение
-  if (task.phase === "planning" && /начин|выполн|старт|go|start/i.test(userQuery)) {
-    if (task.plan.length > 0) {
-      transition(task, "execution", "Пользователь инициировал выполнение");
+  // Если на этапе planning — отслеживаем утверждение плана пользователем
+  if (task.phase === "planning") {
+    const wantsStart    = /начин|выполн|старт|go|start/i.test(userQuery);
+    const wantsApprove  = /утверж|одобр|принят/i.test(userQuery);
+
+    if (wantsStart && task.plan.length > 0) {
+      // Пользователь явно говорит "начинай" — считаем это утверждением + переход
+      task.planApproved = true;
+      transition(task, "execution", "Пользователь утвердил план и инициировал выполнение");
+    } else if (wantsApprove && task.plan.length > 0 && !task.planApproved) {
+      // Пользователь утверждает план без немедленного запуска
+      task.planApproved = true;
     }
   }
 
@@ -559,6 +626,48 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
       process.exit(0);
     }
 
+    // --task approve-plan  Утвердить план (открывает переход planning → execution)
+    if (sub === "approve-plan") {
+      const task = loadTask();
+      if (!task.id) { console.error("Задача не создана."); process.exit(1); }
+      if (task.phase !== "planning") {
+        console.error(`Утверждение плана доступно только на этапе PLANNING. Текущий этап: ${task.phase}.`);
+        process.exit(1);
+      }
+      if (task.planApproved) {
+        console.log("План уже утверждён. Можно перейти к выполнению: --task advance execution");
+        process.exit(0);
+      }
+      if (!task.plan.length) {
+        console.log("⚠  План ещё не сформирован агентом, но утверждение зафиксировано.");
+      }
+      task.planApproved = true;
+      saveTask(task);
+      console.log("✓ План утверждён. Теперь можно перейти к выполнению:");
+      console.log("  node agent.js --task advance execution");
+      process.exit(0);
+    }
+
+    // --task mark-validated  Отметить валидацию как пройденную (для тестирования без API)
+    if (sub === "mark-validated") {
+      const task = loadTask();
+      if (!task.id) { console.error("Задача не создана."); process.exit(1); }
+      if (task.phase !== "validation") {
+        console.error(`Отметка валидации доступна только на этапе VALIDATION. Текущий этап: ${task.phase}.`);
+        process.exit(1);
+      }
+      if (task.validationPassed) {
+        console.log("Валидация уже отмечена как пройденная. Можно завершить: --task advance done");
+        process.exit(0);
+      }
+      task.validationPassed = true;
+      task.validationResult = "Отмечено вручную (CLI)";
+      saveTask(task);
+      console.log("✓ Валидация отмечена как пройденная. Теперь можно завершить задачу:");
+      console.log("  node agent.js --task advance done");
+      process.exit(0);
+    }
+
     // --task reset  Сбросить задачу и историю
     if (sub === "reset") {
       saveTask(defaultTask());
@@ -585,6 +694,8 @@ if (process.argv[1] && new URL(import.meta.url).pathname.endsWith(process.argv[1
       '  --task new "<описание>"          Создать новую задачу (сбрасывает историю)',
       "  --task status                    Показать текущее состояние FSM",
       "  --task advance [<этап>] [--reason <причина>]  Перейти к следующему этапу",
+      "  --task approve-plan              Утвердить план (разблокирует переход в execution)",
+      "  --task mark-validated            Отметить валидацию как пройденную (разблокирует done)",
       "  --task reset                     Сбросить задачу и историю",
       "  --task fsm                       Показать граф переходов",
     ].join("\n"));

@@ -1,0 +1,13 @@
+{
+  "name": "mcp-git",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP server wrapping Git CLI — status, log, diff, branch, commit, push/pull and more",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
