@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "btc-mcp": {
+      "command": "node",
+      "args": ["C:/Users/user/Documents/claude/mcp/btc-mcp/server.js"]
+    }
+  }
+}

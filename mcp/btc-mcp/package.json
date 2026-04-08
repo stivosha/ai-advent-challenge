@@ -1,0 +1,13 @@
+{
+  "name": "mcp-btc",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP server: 1-second BTC price polling with stats, candles and history",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

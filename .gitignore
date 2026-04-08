@@ -17,6 +17,9 @@ npm-debug.log*
 history.json
 memory.json
 task.json
+candles.json
+stats.json
+ticks.json
 
 # PS
 *.ps1
