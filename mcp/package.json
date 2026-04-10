@@ -1,0 +1,13 @@
+{
+  "name": "btc-pipeline",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Pipeline: fetch BTC 24h → summarize → save report",
+  "main": "pipeline.js",
+  "scripts": {
+    "start": "node pipeline.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

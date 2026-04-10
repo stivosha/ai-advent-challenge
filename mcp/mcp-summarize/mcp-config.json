@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mcp-summarize": {
+      "command": "node",
+      "args": ["/Users/sadovskygeorgy/Documents/claude_projects/ai-advent-challenge/mcp/mcp-summarize/server.js"]
+    }
+  }
+}

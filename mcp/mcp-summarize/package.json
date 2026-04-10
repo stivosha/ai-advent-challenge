@@ -1,0 +1,13 @@
+{
+  "name": "mcp-summarize",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP server: analyze 24h BTC hourly data and generate a price forecast",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

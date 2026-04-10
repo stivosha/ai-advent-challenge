@@ -20,6 +20,7 @@ task.json
 candles.json
 stats.json
 ticks.json
+btc_report*
 
 # PS
 *.ps1

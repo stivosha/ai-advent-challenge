@@ -1,0 +1,13 @@
+{
+  "name": "mcp-save",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP server: save BTC analysis report to a txt file",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

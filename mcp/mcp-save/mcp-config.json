@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mcp-save": {
+      "command": "node",
+      "args": ["/Users/sadovskygeorgy/Documents/claude_projects/ai-advent-challenge/mcp/mcp-save/server.js"]
+    }
+  }
+}

@@ -2,7 +2,7 @@
   "mcpServers": {
     "btc-mcp": {
       "command": "node",
-      "args": ["C:/Users/user/Documents/claude/mcp/btc-mcp/server.js"]
+      "args": ["/Users/sadovskygeorgy/Documents/claude_projects/ai-advent-challenge/mcp/btc-mcp/server.js"]
     }
   }
 }
