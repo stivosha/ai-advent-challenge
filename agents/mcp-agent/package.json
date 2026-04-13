@@ -1,0 +1,12 @@
+{
+  "name": "mcp-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "GigaChat agent with multi-MCP-server tool use and 3-layer memory",
+  "scripts": {
+    "ask": "node agent.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

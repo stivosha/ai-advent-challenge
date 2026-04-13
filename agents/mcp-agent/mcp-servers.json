@@ -1,0 +1,39 @@
+{
+  "servers": [
+    {
+      "name": "simple-agent",
+      "description": "MCP-сервер для simple-agent (GigaChat с памятью)",
+      "type": "stdio",
+      "command": "node",
+      "args": ["../../mcp/simple-agent/server.js"]
+    },
+    {
+      "name": "git",
+      "description": "Git CLI — status, log, diff, branch, commit, push/pull и другие операции",
+      "type": "stdio",
+      "command": "node",
+      "args": ["../../mcp/git-mcp/server.js"]
+    },
+    {
+      "name": "btc",
+      "description": "Курс BTC: поллинг каждую секунду, статистика, свечи, история",
+      "type": "stdio",
+      "command": "node",
+      "args": ["../../mcp/btc-mcp/server.js"]
+    },
+    {
+      "name": "btc-save",
+      "description": "Сохранение отчёта по анализу BTC в txt-файл",
+      "type": "stdio",
+      "command": "node",
+      "args": ["../../mcp/mcp-save/server.js"]
+    },
+    {
+      "name": "btc-summarize",
+      "description": "Анализ 24ч почасовых данных BTC и генерация прогноза цены",
+      "type": "stdio",
+      "command": "node",
+      "args": ["../../mcp/mcp-summarize/server.js"]
+    }
+  ]
+}

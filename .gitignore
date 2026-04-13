@@ -20,6 +20,7 @@ task.json
 candles.json
 stats.json
 ticks.json
+hourly_24h.json
 btc_report*
 
 # PS

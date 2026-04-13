@@ -1,31 +1,32 @@
 {
-  "generatedAt": "2026-04-10T08:48:44.701Z",
-  "dataFetchedAt": "2026-04-10T08:48:43.974Z",
-  "current_price": 71571.42,
-  "open_24h": 71534.68,
-  "change_24h_pct": 0.0514,
-  "high_24h": 73145,
-  "low_24h": 70522.77,
-  "ema7": 71783.84,
-  "ema14": 71808.87,
-  "rsi14": 44.35,
+  "generatedAt": "2026-04-13T08:38:17.675Z",
+  "dataFetchedAt": "2026-04-13T08:38:17.673Z",
+  "current_price": 70729.21,
+  "open_24h": 71531.94,
+  "change_24h_pct": -1.1222,
+  "high_24h": 71682.72,
+  "low_24h": 70505.88,
+  "ema7": 70894.15,
+  "ema14": 70969.21,
+  "rsi14": 40.54,
   "volume": {
-    "avg_volume": 758.97,
-    "last_volume": 525.75,
-    "volume_ratio": 0.69
+    "avg_volume": 467.49,
+    "last_volume": 170.69,
+    "volume_ratio": 0.37
   },
-  "trend": "sideways",
+  "trend": "downtrend",
   "forecast": {
     "direction": "DOWN",
     "confidence": "moderate",
     "bull_score": 1,
-    "bear_score": 2,
+    "bear_score": 3,
     "signals": [
-      "24h price change positive",
-      "RSI 44.35 bearish momentum",
-      "EMA7 < EMA14 — death cross"
+      "24h price change negative",
+      "RSI 40.54 bearish momentum",
+      "EMA7 < EMA14 — death cross",
+      "Price near 24h support (bounce zone)"
     ],
-    "estimated_next_target": 70139.99,
+    "estimated_next_target": 69314.63,
     "note": "Based on 24h hourly candles. DOWN with moderate confidence."
   }
 }
