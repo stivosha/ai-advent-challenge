@@ -21,7 +21,12 @@ candles.json
 stats.json
 ticks.json
 hourly_24h.json
+summary.json
 btc_report*
+*.pdf
+index
+*.txt
+
 
 # PS
 *.ps1
