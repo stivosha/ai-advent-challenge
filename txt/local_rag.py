@@ -1,29 +1,27 @@
 """
-RAG Pipeline  (GigaChat Embeddings + Chat)
-==========================================
-  question → retrieve(fetch_k) → rerank/filter → structured LLM answer
-  Structured answer always contains:
-    ## ОТВЕТ      — actual answer
-    ## ИСТОЧНИКИ  — list of chunk_id / section used
-    ## ЦИТАТЫ     — verbatim quotes from chunks
-  If no chunk passes the relevance threshold → "не знаю" without LLM call.
+Local RAG Pipeline  (GigaChat Embeddings + Gemma3 via Ollama)
+=============================================================
+  Identical retrieval/reranking to rag.py — only the LLM call is replaced
+  with a local Gemma3 model served by Ollama.
+
+  Reuses the existing FAISS + SQLite index built by indexer.py.
 
 Usage:
-  python rag.py                             # full benchmark
-  python rag.py --query "кто такой Хулио?"
-  python rag.py --query "..." --strategy struct --top_k 10 --top_k_final 3
-  python rag.py --eval                      # only benchmark
-  python rag.py --eval --no_rerank          # skip reranker (baseline)
+  python local_rag.py                             # full benchmark
+  python local_rag.py --query "кто такой Зернов?"
+  python local_rag.py --query "..." --strategy struct --top_k 10 --top_k_final 3
+  python local_rag.py --eval                      # only benchmark
 
 Env:
-  GIGACHAT_API_KEY=<your_key>   (or .env file)
+  GIGACHAT_API_KEY=<your_key>   (for retrieval embeddings)
+  OLLAMA_URL=http://localhost:11434  (optional override)
+  OLLAMA_MODEL=gemma3                (optional override)
 """
 
 from __future__ import annotations
 
 import sys
 import io
-# Force UTF-8 output on Windows (avoids CP1251 UnicodeEncodeError)
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -32,19 +30,20 @@ if hasattr(sys.stderr, "reconfigure"):
 import os
 import re
 import json
+import time
 import sqlite3
 import textwrap
 import argparse
+import requests
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import faiss
 from dotenv import load_dotenv
 from gigachat import GigaChat
-from gigachat.exceptions import ResponseError
-from gigachat.models import Chat, Messages, MessagesRole
 
 # ---------------------------------------------------------------------------
 # Config
@@ -53,22 +52,19 @@ load_dotenv(Path(__file__).parent / ".env")
 
 INDEX_DIR   = Path(__file__).parent / "index"
 EMBED_MODEL = "Embeddings"
-CHAT_MODEL  = "GigaChat-Pro"
 
-TOP_K_RETRIEVE = 10    # candidates from FAISS (wide net)
-TOP_K_FINAL    = 5     # max chunks sent to LLM after filter
+OLLAMA_BASE  = os.environ.get("OLLAMA_URL",   "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3")
+OLLAMA_CHAT  = f"{OLLAMA_BASE}/api/chat"
 
-# Adaptive threshold: keep chunks with dist <= best_dist * AUTO_FACTOR.
-# GigaChat embeddings are NOT unit-normalized (norm ≈ 28),
-# so L2 distances are in the hundreds — never use a fixed small threshold.
-# AUTO_FACTOR=1.05 means "within 5% of the best match distance".
-AUTO_FACTOR      = 1.05  # keep chunks within 5% of best match
-DIST_THRESHOLD   = None  # None → adaptive; float → absolute cutoff
-TOPIC_COVER_MIN  = 0.10  # min fraction of query words (>=4 chars) that must
-                          # appear in at least one chunk; below → "не знаю"
+TOP_K_RETRIEVE = 10
+TOP_K_FINAL    = 5
+AUTO_FACTOR    = 1.05
+DIST_THRESHOLD = None
+TOPIC_COVER_MIN = 0.10
 
 # ---------------------------------------------------------------------------
-# Prompts
+# Prompts (same as rag.py)
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = (
     "Ты — литературный ассистент по роману «Четыре всадника Апокалипсиса» "
@@ -115,7 +111,7 @@ NO_CONTEXT_ANSWER = """\
 NO_RAG_TEMPLATE = "{question}"
 
 # ---------------------------------------------------------------------------
-# Eval questions
+# Eval questions (identical to rag.py)
 # ---------------------------------------------------------------------------
 EVAL_QUESTIONS = [
     {
@@ -216,7 +212,6 @@ EVAL_QUESTIONS = [
         ),
         "sources": ["ЧАСТЬ ЧЕТВЕРТАЯ", "32. НА ВЕКА!"],
     },
-    # ── "не знаю"-тест: намеренно нерелевантный вопрос ──
     {
         "id": 11,
         "question": "Какова молекулярная масса воды?",
@@ -224,6 +219,49 @@ EVAL_QUESTIONS = [
         "sources": [],
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Ollama helpers
+# ---------------------------------------------------------------------------
+def ensure_ollama_running() -> None:
+    try:
+        requests.get(OLLAMA_BASE, timeout=2)
+        return
+    except requests.exceptions.ConnectionError:
+        pass
+
+    print("Запускаю ollama...", flush=True)
+    subprocess.Popen(
+        ["ollama", "serve"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(20):
+        time.sleep(0.5)
+        try:
+            requests.get(OLLAMA_BASE, timeout=1)
+            print("ollama запущена.\n", flush=True)
+            return
+        except requests.exceptions.ConnectionError:
+            pass
+    print("Не удалось запустить ollama. Запусти вручную: ollama serve")
+    sys.exit(1)
+
+
+def ask_gemma3(prompt: str, system: str = SYSTEM_PROMPT, timeout: int = 180) -> str:
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system",    "content": system},
+            {"role": "user",      "content": prompt},
+        ],
+        "stream": False,
+        "options": {"temperature": 0.2, "num_predict": 1536},
+    }
+    resp = requests.post(OLLAMA_CHAT, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()["message"]["content"].strip()
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -240,14 +278,13 @@ class RetrievedChunk:
 
 @dataclass
 class StructuredAnswer:
-    """Parsed structured response from LLM."""
-    answer:     str
-    sources:    List[str]    # ["[struct_0012] Книга первая / 1", ...]
-    quotes:     List[str]    # verbatim quote strings
-    is_unknown: bool = False  # triggered by empty-context rule
+    answer:      str
+    sources:     List[str]
+    quotes:      List[str]
+    is_unknown:  bool = False
     has_sources: bool = False
     has_quotes:  bool = False
-    raw: str = ""            # original LLM output
+    raw:         str  = ""
 
     def __post_init__(self):
         self.has_sources = bool(self.sources and self.sources[0] != "(нет релевантных источников)")
@@ -255,7 +292,7 @@ class StructuredAnswer:
 
 
 # ---------------------------------------------------------------------------
-# Retrieval  (Stage 1)
+# Retrieval  (Stage 1) — identical to rag.py, uses GigaChat embeddings
 # ---------------------------------------------------------------------------
 def retrieve(query: str, strategy: str, fetch_k: int, giga: GigaChat) -> List[RetrievedChunk]:
     faiss_path = INDEX_DIR / f"{strategy}.faiss"
@@ -282,13 +319,9 @@ def retrieve(query: str, strategy: str, fetch_k: int, giga: GigaChat) -> List[Re
 
 
 # ---------------------------------------------------------------------------
-# Reranker / Filter  (Stage 2)
+# Reranker / Filter  (Stage 2) — identical to rag.py
 # ---------------------------------------------------------------------------
-def _topic_coverage(query: str, chunks: List["RetrievedChunk"]) -> float:
-    """
-    Fraction of significant query words (>=4 chars) found in ANY chunk.
-    Low coverage → question is off-topic for this corpus → "не знаю".
-    """
+def _topic_coverage(query: str, chunks: List[RetrievedChunk]) -> float:
     words = list(set(re.findall(r'\b\w{4,}\b', query.lower())))
     if not words:
         return 1.0
@@ -308,27 +341,14 @@ def _keyword_overlap(query: str, text: str) -> float:
 def rerank_filter(
     query:       str,
     chunks:      List[RetrievedChunk],
-    threshold:   Optional[float],   # None → adaptive
+    threshold:   Optional[float],
     top_k_final: int,
 ) -> Tuple[List[RetrievedChunk], List[RetrievedChunk], float]:
-    """
-    Returns (kept, rejected, applied_threshold).
-
-    Threshold logic:
-      • threshold=None  → adaptive: best_dist * AUTO_FACTOR
-        Keeps chunks "close enough" to the best match.
-        Works with any embedding scale (normalized or not).
-      • threshold=float → absolute L2 cutoff (user-supplied).
-    """
     if not chunks:
         return [], [], 0.0
 
-    best_dist = chunks[0].dist   # FAISS results are sorted by distance
-
-    if threshold is None:
-        applied = best_dist * AUTO_FACTOR   # within 5% of best match
-    else:
-        applied = threshold
+    best_dist = chunks[0].dist
+    applied   = best_dist * AUTO_FACTOR if threshold is None else threshold
 
     kept:     List[Tuple[float, RetrievedChunk]] = []
     rejected: List[RetrievedChunk] = []
@@ -337,7 +357,6 @@ def rerank_filter(
         if c.dist > applied:
             rejected.append(c)
             continue
-        # Score: normalised distance (lower=better) minus keyword overlap bonus
         norm_dist   = c.dist / applied
         kw_bonus    = _keyword_overlap(query, c.text) * 0.15
         final_score = norm_dist - kw_bonus
@@ -362,14 +381,14 @@ def build_context(chunks: List[RetrievedChunk]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Structured answer parser
+# Structured answer parser — identical to rag.py
 # ---------------------------------------------------------------------------
 _SEC = re.DOTALL | re.IGNORECASE
 
+
 def _extract_section(text: str, header: str) -> str:
-    """Extract text between ## HEADER and the next ## or end-of-string."""
     pat = rf'##\s*{re.escape(header)}\s*\n(.*?)(?=\n##|\Z)'
-    m = re.search(pat, text, _SEC)
+    m   = re.search(pat, text, _SEC)
     return m.group(1).strip() if m else ""
 
 
@@ -378,7 +397,6 @@ def parse_structured_answer(raw: str) -> StructuredAnswer:
     sources_text = _extract_section(raw, "ИСТОЧНИКИ")
     quotes_text  = _extract_section(raw, "ЦИТАТЫ")
 
-    # Fallback: if no ## markers at all, treat whole text as answer
     if not answer_text:
         answer_text = raw.strip()
 
@@ -393,12 +411,8 @@ def parse_structured_answer(raw: str) -> StructuredAnswer:
         ln = ln.strip()
         if not ln:
             continue
-        if ln.startswith(">"):
-            quotes.append(ln[1:].strip())
-        else:
-            quotes.append(ln)
+        quotes.append(ln[1:].strip() if ln.startswith(">") else ln)
 
-    # Detect if LLM itself admitted it doesn't know
     _unkn_patterns = re.compile(
         r'не\s+знаю|не\s+упоминается|нет\s+в\s+фрагмент|не\s+содержит|'
         r'нет\s+информации|не\s+нашел|не\s+нашёл|отсутствует\s+в\s+тексте',
@@ -422,29 +436,7 @@ def make_unknown_answer() -> StructuredAnswer:
 
 
 # ---------------------------------------------------------------------------
-# LLM call
-# ---------------------------------------------------------------------------
-def ask_llm(prompt: str, giga: GigaChat, system: str = SYSTEM_PROMPT) -> str:
-    chat = Chat(
-        model=CHAT_MODEL,
-        messages=[
-            Messages(role=MessagesRole.SYSTEM, content=system),
-            Messages(role=MessagesRole.USER,   content=prompt),
-        ],
-        temperature=0.2,
-        max_tokens=1536,
-    )
-    try:
-        return giga.chat(chat).choices[0].message.content.strip()
-    except ResponseError as e:
-        code = e.args[0] if e.args else "?"
-        msg  = f"[GigaChat error {code} — ответ недоступен]"
-        print(f"\n  ⚠  {msg}", file=sys.stderr)
-        return msg
-
-
-# ---------------------------------------------------------------------------
-# Full RAG answer: retrieve → filter → LLM (or "не знаю")
+# Full RAG answer: retrieve → filter → Gemma3 (or "не знаю")
 # ---------------------------------------------------------------------------
 def rag_answer(
     question:    str,
@@ -455,10 +447,6 @@ def rag_answer(
     use_rerank:  bool,
     giga:        GigaChat,
 ) -> Tuple[StructuredAnswer, List[RetrievedChunk], List[RetrievedChunk]]:
-    """
-    Returns (structured_answer, chunks_before_filter, chunks_after_filter).
-    If no chunks pass filter → is_unknown=True, no LLM call.
-    """
     chunks_raw = retrieve(question, strategy, fetch_k, giga)
 
     if use_rerank:
@@ -473,14 +461,13 @@ def rag_answer(
     if not chunks_final:
         return make_unknown_answer(), chunks_raw, []
 
-    # Topic coverage check: if query words barely appear in chunks → off-topic
     coverage = _topic_coverage(question, chunks_final)
     if coverage < TOPIC_COVER_MIN:
         return make_unknown_answer(), chunks_raw, chunks_final
 
     context = build_context(chunks_final)
     prompt  = RAG_TEMPLATE.format(context=context, question=question)
-    raw     = ask_llm(prompt, giga)
+    raw     = ask_gemma3(prompt)
     sa      = parse_structured_answer(raw)
     return sa, chunks_raw, chunks_final
 
@@ -498,47 +485,50 @@ def run_query(
 ) -> None:
     creds = os.environ.get("GIGACHAT_API_KEY")
     if not creds:
-        raise RuntimeError("GIGACHAT_API_KEY not set")
+        raise RuntimeError("GIGACHAT_API_KEY not set (needed for embeddings)")
+
+    ensure_ollama_running()
 
     with GigaChat(credentials=creds, verify_ssl_certs=False) as giga:
         print(f"\n{'='*72}")
         print(f"ВОПРОС: {question}")
         print(f"{'='*72}")
-        print(f"  strategy={strategy}  fetch_k={fetch_k}  "
-              f"top_k_final={top_k_final}  threshold={threshold}  rerank={use_rerank}")
+        print(f"  model={OLLAMA_MODEL}  strategy={strategy}  fetch_k={fetch_k}  "
+              f"top_k_final={top_k_final}  rerank={use_rerank}")
 
-        # ── No RAG ──
-        print("\n[БЕЗ RAG]")
-        no_rag_raw = ask_llm(NO_RAG_TEMPLATE.format(question=question), giga,
-                             system="Ты — литературный ассистент.")
+        print("\n[БЕЗ RAG] (Gemma3)")
+        t0 = time.perf_counter()
+        no_rag_raw = ask_gemma3(NO_RAG_TEMPLATE.format(question=question),
+                                system="Ты — литературный ассистент.")
+        no_rag_ms = int((time.perf_counter() - t0) * 1000)
         print(textwrap.indent(no_rag_raw, "  "))
+        print(f"  [{no_rag_ms} ms]\n")
 
-        # ── RAG ──
+        t0 = time.perf_counter()
         sa, chunks_raw, chunks_final = rag_answer(
             question, strategy, fetch_k, top_k_final, threshold, use_rerank, giga
         )
+        rag_ms = int((time.perf_counter() - t0) * 1000)
 
-        # Compute what threshold will actually be applied (for display)
         diag_thr = threshold if threshold is not None else (
             chunks_raw[0].dist * AUTO_FACTOR if chunks_raw else 0.0
         )
         thr_label = f"{diag_thr:.2f}" if threshold is not None else f"{diag_thr:.2f} (auto)"
 
-        print(f"\n[STAGE 1] Получено {len(chunks_raw)} кандидатов  "
-              f"(applied threshold={thr_label}):")
+        print(f"[STAGE 1] Получено {len(chunks_raw)} кандидатов  (threshold={thr_label}):")
         for c in chunks_raw:
             flag = "ok" if c.dist <= diag_thr else "--"
             print(f"  [{flag}] dist={c.dist:.2f}  [{c.chunk_id}]  "
                   f"{c.title[:30]} / {c.section[:25]}")
 
         print(f"\n[STAGE 2] После фильтра: {len(chunks_final)} чанков  "
-              f"({'НЕ ЗНАЮ' if sa.is_unknown else 'передаём в LLM'})")
+              f"({'НЕ ЗНАЮ' if sa.is_unknown else 'передаём в Gemma3'})")
 
         print(f"\n{'─'*72}")
         print(sa.raw if sa.raw else NO_CONTEXT_ANSWER)
         print(f"{'─'*72}")
         print(f"  has_sources={sa.has_sources}  has_quotes={sa.has_quotes}  "
-              f"is_unknown={sa.is_unknown}")
+              f"is_unknown={sa.is_unknown}  [{rag_ms} ms]")
         print()
 
 
@@ -552,15 +542,18 @@ class EvalResult:
     expected: str
     sources:  List[str]
 
-    chunks_before:  int = 0
-    chunks_after:   int = 0
-    dists_before:   List[float] = field(default_factory=list)
+    chunks_before: int = 0
+    chunks_after:  int = 0
+    dists_before:  List[float] = field(default_factory=list)
     retrieved_sources_raw:      List[str] = field(default_factory=list)
     retrieved_sources_filtered: List[str] = field(default_factory=list)
 
-    answer_no_rag:           str = ""
-    sa_raw:      StructuredAnswer = field(default_factory=lambda: StructuredAnswer("","",""))
-    sa_filtered: StructuredAnswer = field(default_factory=lambda: StructuredAnswer("","",""))
+    answer_no_rag:  str = ""
+    no_rag_ms:      int = 0
+    rag_ms:         int = 0
+
+    sa_raw:      StructuredAnswer = field(default_factory=lambda: StructuredAnswer("", [], []))
+    sa_filtered: StructuredAnswer = field(default_factory=lambda: StructuredAnswer("", [], []))
 
 
 def _source_match(expected: List[str], retrieved: List[str]) -> bool:
@@ -577,7 +570,9 @@ def run_benchmark(
 ) -> None:
     creds = os.environ.get("GIGACHAT_API_KEY")
     if not creds:
-        raise RuntimeError("GIGACHAT_API_KEY not set")
+        raise RuntimeError("GIGACHAT_API_KEY not set (needed for embeddings)")
+
+    ensure_ollama_running()
 
     results: List[EvalResult] = []
 
@@ -592,15 +587,15 @@ def run_benchmark(
                 expected=q["expected"], sources=q["sources"],
             )
 
-            # No RAG
-            print("  → без RAG...")
-            er.answer_no_rag = ask_llm(
-                NO_RAG_TEMPLATE.format(question=q["question"]), giga,
-                system="Ты — литературный ассистент."
+            print("  → без RAG (Gemma3)...")
+            t0 = time.perf_counter()
+            er.answer_no_rag = ask_gemma3(
+                NO_RAG_TEMPLATE.format(question=q["question"]),
+                system="Ты — литературный ассистент.",
             )
+            er.no_rag_ms = int((time.perf_counter() - t0) * 1000)
 
-            # RAG without filter (baseline)
-            print("  → RAG без фильтра...")
+            print("  → RAG без фильтра (Gemma3)...")
             chunks_raw = retrieve(q["question"], strategy, fetch_k, giga)
             er.chunks_before  = len(chunks_raw)
             er.dists_before   = [c.dist for c in chunks_raw]
@@ -609,15 +604,17 @@ def run_benchmark(
             raw_top = chunks_raw[:top_k_final]
             if raw_top:
                 ctx_raw = build_context(raw_top)
-                sa_raw  = parse_structured_answer(
-                    ask_llm(RAG_TEMPLATE.format(context=ctx_raw, question=q["question"]), giga)
+                t0 = time.perf_counter()
+                sa_raw = parse_structured_answer(
+                    ask_gemma3(RAG_TEMPLATE.format(context=ctx_raw, question=q["question"]))
                 )
+                er.rag_ms = int((time.perf_counter() - t0) * 1000)
             else:
-                sa_raw = make_unknown_answer()
+                sa_raw    = make_unknown_answer()
+                er.rag_ms = 0
             er.sa_raw = sa_raw
 
-            # RAG with filter
-            print("  → RAG с фильтром...")
+            print("  → RAG с фильтром (Gemma3)...")
             if use_rerank:
                 chunks_final, _, _thr = rerank_filter(
                     q["question"], chunks_raw, threshold, top_k_final
@@ -633,29 +630,24 @@ def run_benchmark(
             if chunks_final:
                 ctx_filt = build_context(chunks_final)
                 sa_filt  = parse_structured_answer(
-                    ask_llm(RAG_TEMPLATE.format(context=ctx_filt, question=q["question"]), giga)
+                    ask_gemma3(RAG_TEMPLATE.format(context=ctx_filt, question=q["question"]))
                 )
             else:
                 sa_filt = make_unknown_answer()
             er.sa_filtered = sa_filt
-
             results.append(er)
 
-            # ── Print full comparison ──────────────────────────────────────
             W = 72
-            print(f"\n  {'ОЖИДАЕМЫЙ ОТВЕТ':}")
+            print(f"\n  ОЖИДАЕМЫЙ ОТВЕТ:")
             print(textwrap.indent(er.expected, "    "))
-
             print(f"\n  {'─'*W}")
-            print(f"  БЕЗ RAG:")
+            print(f"  БЕЗ RAG [{er.no_rag_ms} ms]:")
             print(textwrap.indent(er.answer_no_rag, "    "))
-
             print(f"\n  {'─'*W}")
-            print(f"  RAG БЕЗ ФИЛЬТРА  "
+            print(f"  RAG БЕЗ ФИЛЬТРА [{er.rag_ms} ms]  "
                   f"(чанков: {er.chunks_before}, "
                   f"src={sa_raw.has_sources}, qts={sa_raw.has_quotes}, unk={sa_raw.is_unknown}):")
             print(textwrap.indent(sa_raw.raw or sa_raw.answer, "    "))
-
             print(f"\n  {'─'*W}")
             print(f"  RAG С ФИЛЬТРОМ  "
                   f"(чанков: {er.chunks_before} → {er.chunks_after}, "
@@ -664,7 +656,7 @@ def run_benchmark(
             print(f"  {'─'*W}\n")
 
     # ── Save report ──
-    report_path = INDEX_DIR / "rag_benchmark.json"
+    report_path = INDEX_DIR / "local_rag_benchmark.json"
     report = []
     for r in results:
         is_unknown_question = r.expected == "не знаю"
@@ -674,6 +666,7 @@ def run_benchmark(
             "expected": r.expected,
             "expected_sources": r.sources,
             "is_unknown_question": is_unknown_question,
+            "timing_ms": {"no_rag": r.no_rag_ms, "rag": r.rag_ms},
             "retrieval": {
                 "chunks_before_filter": r.chunks_before,
                 "chunks_after_filter":  r.chunks_after,
@@ -684,7 +677,6 @@ def run_benchmark(
             "source_match_raw":      _source_match(r.sources, r.retrieved_sources_raw),
             "source_match_filtered": _source_match(r.sources, r.retrieved_sources_filtered),
             "answer_no_rag": r.answer_no_rag,
-            # ── RAG without filter ──
             "rag_raw": {
                 "answer":      r.sa_raw.answer,
                 "sources":     r.sa_raw.sources,
@@ -694,7 +686,6 @@ def run_benchmark(
                 "is_unknown":  r.sa_raw.is_unknown,
                 "full_response": r.sa_raw.raw,
             },
-            # ── RAG with filter / reranker ──
             "rag_filtered": {
                 "answer":      r.sa_filtered.answer,
                 "sources":     r.sa_filtered.sources,
@@ -704,16 +695,12 @@ def run_benchmark(
                 "is_unknown":  r.sa_filtered.is_unknown,
                 "full_response": r.sa_filtered.raw,
             },
-            # ── Checks ──
             "checks": {
-                "rag_raw_has_sources":        r.sa_raw.has_sources,
-                "rag_raw_has_quotes":         r.sa_raw.has_quotes,
-                "rag_filtered_has_sources":   r.sa_filtered.has_sources,
-                "rag_filtered_has_quotes":    r.sa_filtered.has_quotes,
-                "unknown_rule_correct":
-                    # for Q11: filtered should be is_unknown=True
-                    # for Q1-10: filtered should NOT be is_unknown
-                    (r.sa_filtered.is_unknown == is_unknown_question),
+                "rag_raw_has_sources":      r.sa_raw.has_sources,
+                "rag_raw_has_quotes":       r.sa_raw.has_quotes,
+                "rag_filtered_has_sources": r.sa_filtered.has_sources,
+                "rag_filtered_has_quotes":  r.sa_filtered.has_quotes,
+                "unknown_rule_correct":     (r.sa_filtered.is_unknown == is_unknown_question),
             },
         })
 
@@ -722,16 +709,15 @@ def run_benchmark(
     )
     print(f"\n\nОтчёт → {report_path}")
 
-    # ── Summary table ──
     print("\n" + "="*90)
-    print("ИТОГОВАЯ ТАБЛИЦА")
+    print("ИТОГОВАЯ ТАБЛИЦА  (Gemma3 local)")
     print(f"{'#':>3} | {'Вопрос (кратко)':<38} | "
           f"{'src↑':^5} | {'qts↑':^5} | "
           f"{'src↑f':^6} | {'qts↑f':^6} | "
-          f"{'unk?':^5} | {'до':^4} | {'после':^5}")
+          f"{'unk?':^5} | {'до':^4} | {'после':^5} | {'ms':^7}")
     print("-"*90)
     for r in results:
-        item = report[r.id - 1]  # indexed by id
+        item = report[r.id - 1]
         chk  = item["checks"]
         print(
             f"{r.id:>3} | {r.question[:37]:<38} | "
@@ -740,29 +726,33 @@ def run_benchmark(
             f"{'✓' if item['rag_filtered']['has_sources'] else '·':^6} | "
             f"{'✓' if item['rag_filtered']['has_quotes']  else '·':^6} | "
             f"{'✓' if chk['unknown_rule_correct']         else '✗':^5} | "
-            f"{r.chunks_before:^4} | {r.chunks_after:^5}"
+            f"{r.chunks_before:^4} | {r.chunks_after:^5} | "
+            f"{r.rag_ms:>6}ms"
         )
     print("="*90)
 
     total  = len(results)
     hits   = lambda key: sum(1 for x in report if x["rag_filtered"][key])
     unk_ok = sum(1 for x in report if x["checks"]["unknown_rule_correct"])
+    avg_ms = sum(r.rag_ms for r in results) / total if total else 0
     print(f"\n  has_sources (filtered): {hits('has_sources')}/{total}")
     print(f"  has_quotes  (filtered): {hits('has_quotes')}/{total}")
     print(f"  unknown rule correct  : {unk_ok}/{total}")
+    print(f"  avg RAG latency (ms)  : {avg_ms:.0f}")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RAG pipeline with structured output + reranker")
+    parser = argparse.ArgumentParser(
+        description="Local RAG pipeline: GigaChat embeddings + Gemma3 (Ollama)"
+    )
     parser.add_argument("--query",       default=None)
     parser.add_argument("--strategy",    default="struct", choices=["fixed", "struct"])
     parser.add_argument("--top_k",       default=TOP_K_RETRIEVE, type=int)
     parser.add_argument("--top_k_final", default=TOP_K_FINAL,    type=int)
-    parser.add_argument("--threshold",   default=None, type=float,
-                        help="Absolute L2 cutoff. Default: adaptive (best_dist * AUTO_FACTOR)")
+    parser.add_argument("--threshold",   default=None, type=float)
     parser.add_argument("--no_rerank",   action="store_true")
     parser.add_argument("--eval",        action="store_true")
     args = parser.parse_args()
