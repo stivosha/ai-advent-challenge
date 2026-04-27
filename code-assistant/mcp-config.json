@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "code-assistant": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/code-assistant/server.js"],
+      "env": {
+        "PROJECT_PATH": "/ABSOLUTE/PATH/TO/YOUR/PROJECT",
+        "OLLAMA_URL": "http://localhost:11434",
+        "OLLAMA_MODEL": "gemma3"
+      }
+    }
+  }
+}

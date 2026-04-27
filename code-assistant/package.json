@@ -1,0 +1,14 @@
+{
+  "name": "code-assistant",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Developer assistant MCP server — RAG over project docs + git context",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  }
+}

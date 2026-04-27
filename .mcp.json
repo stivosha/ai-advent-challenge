@@ -2,7 +2,20 @@
   "mcpServers": {
     "git": {
       "command": "node",
-      "args": ["C:\\Users\\user\\Documents\\claude\\mcp\\git-mcp\\server.js"]
+      "args": ["/Users/sadovskygeorgy/Documents/claude_projects/ai-advent-challenge/mcp/git-mcp/server.js"]
+    },
+    "code-assistant": {
+      "command": "node",
+      "args": ["/Users/sadovskygeorgy/Documents/claude_projects/ai-advent-challenge/code-assistant/server.js"],
+      "env": {
+        "PROJECT_PATH": "/Users/sadovskygeorgy/StudioProjects/habit-app-git",
+        "OLLAMA_URL": "http://localhost:11434",
+        "OLLAMA_MODEL": "gemma3",
+        "GIGACHAT_API_KEY": "MDE5Y2ZkOGItNTE5Mi03YjM1LWI5ZTktYTdhYjBkNmNmNDE2OjhhY2JkNTdmLWNiMzItNGRiOC1hZWVjLWRmMjYwMGMzZGU3ZA==",
+        "GIGACHAT_SCOPE": "GIGACHAT_API_PERS",
+        "GIGACHAT_MODEL": "GigaChat-Pro",
+        "NODE_TLS_REJECT_UNAUTHORIZED": "0"
+      }
     }
   }
 }
